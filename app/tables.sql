@@ -1,8 +1,8 @@
-
-CREATE DATABASE blood_donation_system;
+-- Create the database
+CREATE DATABASE IF NOT EXISTS blood_donation_system;
 USE blood_donation_system;
 
-
+-- Create users table
 CREATE TABLE users (
     user_id INT PRIMARY KEY AUTO_INCREMENT,
     username VARCHAR(50) UNIQUE NOT NULL,
@@ -12,6 +12,7 @@ CREATE TABLE users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Create donor_profiles table
 CREATE TABLE donor_profiles (
     donor_id INT PRIMARY KEY AUTO_INCREMENT,
     user_id INT,
@@ -26,7 +27,7 @@ CREATE TABLE donor_profiles (
     FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 
-
+-- Create blood_banks table
 CREATE TABLE blood_banks (
     bank_id INT PRIMARY KEY AUTO_INCREMENT,
     name VARCHAR(100) NOT NULL,
@@ -35,7 +36,7 @@ CREATE TABLE blood_banks (
     email VARCHAR(100) UNIQUE NOT NULL
 );
 
-
+-- Create blood_inventory table
 CREATE TABLE blood_inventory (
     inventory_id INT PRIMARY KEY AUTO_INCREMENT,
     bank_id INT,
@@ -45,7 +46,7 @@ CREATE TABLE blood_inventory (
     FOREIGN KEY (bank_id) REFERENCES blood_banks(bank_id)
 );
 
-
+-- Create donation_records table
 CREATE TABLE donation_records (
     donation_id INT PRIMARY KEY AUTO_INCREMENT,
     donor_id INT,
@@ -58,7 +59,7 @@ CREATE TABLE donation_records (
     FOREIGN KEY (bank_id) REFERENCES blood_banks(bank_id)
 );
 
-
+-- Create blood_requests table
 CREATE TABLE blood_requests (
     request_id INT PRIMARY KEY AUTO_INCREMENT,
     requesting_hospital_id INT,
@@ -70,10 +71,8 @@ CREATE TABLE blood_requests (
     FOREIGN KEY (requesting_hospital_id) REFERENCES blood_banks(bank_id)
 );
 
-
-DELIMITER //
-
 -- Trigger to update inventory after donation
+DELIMITER //
 CREATE TRIGGER after_donation_insert
 AFTER INSERT ON donation_records
 FOR EACH ROW
@@ -93,12 +92,11 @@ BEGIN
     IF NEW.status = 'fulfilled' AND OLD.status != 'fulfilled' THEN
         UPDATE blood_inventory
         SET units_available = units_available - NEW.units_required
-        WHERE bank_id = NEW.requesting_hospital_id 
-        AND blood_type = NEW.blood_type;
+        WHERE bank_id = NEW.requesting_hospital_id AND blood_type = NEW.blood_type;
     END IF;
 END//
 
--- Check donor eligibility
+-- Procedure to check donor eligibility
 CREATE PROCEDURE check_donor_eligibility(IN donor_id_param INT, OUT is_eligible BOOLEAN)
 BEGIN
     DECLARE last_donation DATE;
@@ -113,7 +111,7 @@ BEGIN
     END IF;
 END//
 
--- Process blood request
+-- Procedure to process blood request
 CREATE PROCEDURE process_blood_request(
     IN request_id_param INT,
     IN bank_id_param INT,

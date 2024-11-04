@@ -1,210 +1,334 @@
 import streamlit as st
 import mysql.connector
-from datetime import datetime, date
-import pandas as pd
-from hashlib import sha256
+from mysql.connector import Error
+import bcrypt
+from datetime import datetime, timedelta
+from contextlib import contextmanager
 
 # Database connection
 @st.cache_resource
 def init_connection():
-    return mysql.connector.connect(
-        host="localhost",
-        user="root@localhost",
-        password="Resh@134",
-        database="blood_donation_system"
-    )
+    try:
+        return mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="Resh@1234",
+            database="blood_donation_system"
+        )
+    except mysql.connector.Error as err:
+        st.error(f"Error: {err}")
+        return None
+
+conn = init_connection()
+
+@contextmanager
+def get_cursor(conn):
+    cursor = conn.cursor(dictionary=True)
+    try:
+        yield cursor
+    finally:
+        cursor.close()
 
 # Helper functions
 def hash_password(password):
-    return sha256(password.encode()).hexdigest()
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
-def authenticate_user(username, password):
-    conn = init_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute(
-        "SELECT * FROM users WHERE username = %s AND password_hash = %s",
-        (username, hash_password(password))
-    )
-    user = cursor.fetchone()
-    cursor.close()
-    return user
+def verify_password(password, hashed):
+    return bcrypt.checkpw(password.encode('utf-8'), hashed)
 
+def execute_query(query, params=None):
+    if conn is None:
+        st.error("Database connection not established.")
+        return None
 
+    with get_cursor(conn) as cursor:
+        try:
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            
+            if query.strip().upper().startswith("SELECT"):
+                return cursor.fetchall()
+            else:
+                conn.commit()
+                return cursor.rowcount
+        except Error as e:
+            st.error(f"Error executing query: {e}")
+            return None
+
+# Authentication
+def login(username, password):
+    query = "SELECT * FROM users WHERE username = %s"
+    results = execute_query(query, (username,))
+    
+    if results and len(results) > 0:
+        user = results[0]
+        if verify_password(password, user['password_hash'].encode('utf-8')):
+            return user
+    return None
+
+def register(username, password, email, user_type):
+    hashed_password = hash_password(password)
+    query = "INSERT INTO users (username, password_hash, email, user_type) VALUES (%s, %s, %s, %s)"
+    result = execute_query(query, (username, hashed_password, email, user_type))
+    return result is not None and result > 0
+
+# Donor functions
+def get_donor_profile(user_id):
+    query = "SELECT * FROM donor_profiles WHERE user_id = %s"
+    results = execute_query(query, (user_id,))
+    return results[0] if results else None
+
+def update_donor_profile(user_id, full_name, dob, blood_type, contact, address, medical_history):
+    query = """
+    INSERT INTO donor_profiles 
+    (user_id, full_name, date_of_birth, blood_type, contact_number, address, medical_history) 
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE
+    full_name = VALUES(full_name),
+    date_of_birth = VALUES(date_of_birth),
+    blood_type = VALUES(blood_type),
+    contact_number = VALUES(contact_number),
+    address = VALUES(address),
+    medical_history = VALUES(medical_history)
+    """
+    return execute_query(query, (user_id, full_name, dob, blood_type, contact, address, medical_history))
+
+def schedule_donation(donor_id, bank_id, donation_date):
+    query = "INSERT INTO donation_records (donor_id, bank_id, donation_date, blood_type, units_donated) VALUES (%s, %s, %s, (SELECT blood_type FROM donor_profiles WHERE donor_id = %s), 1)"
+    return execute_query(query, (donor_id, bank_id, donation_date, donor_id))
+
+def get_donation_history(donor_id):
+    query = """
+    SELECT dr.donation_date, bb.name as bank_name, dr.blood_type, dr.units_donated, dr.quality_test_status
+    FROM donation_records dr
+    JOIN blood_banks bb ON dr.bank_id = bb.bank_id
+    WHERE dr.donor_id = %s
+    ORDER BY dr.donation_date DESC
+    """
+    return execute_query(query, (donor_id,))
+
+# Hospital staff functions
+def get_inventory_status():
+    query = "SELECT blood_type, SUM(units_available) as total_units FROM blood_inventory GROUP BY blood_type"
+    return execute_query(query)
+
+def submit_blood_request(hospital_id, blood_type, units, priority):
+    query = "INSERT INTO blood_requests (requesting_hospital_id, blood_type, units_required, priority) VALUES (%s, %s, %s, %s)"
+    return execute_query(query, (hospital_id, blood_type, units, priority))
+
+def get_blood_requests(hospital_id):
+    query = "SELECT * FROM blood_requests WHERE requesting_hospital_id = %s ORDER BY request_date DESC"
+    return execute_query(query, (hospital_id,))
+
+# Blood bank staff functions
+def update_inventory(bank_id, blood_type, units):
+    query = """
+    INSERT INTO blood_inventory (bank_id, blood_type, units_available)
+    VALUES (%s, %s, %s)
+    ON DUPLICATE KEY UPDATE
+    units_available = units_available + VALUES(units_available)
+    """
+    return execute_query(query, (bank_id, blood_type, units))
+
+def get_donor_records(bank_id):
+    query = """
+    SELECT dp.full_name, dp.blood_type, dr.donation_date, dr.units_donated, dr.quality_test_status
+    FROM donation_records dr
+    JOIN donor_profiles dp ON dr.donor_id = dp.donor_id
+    WHERE dr.bank_id = %s
+    ORDER BY dr.donation_date DESC
+    """
+    return execute_query(query, (bank_id,))
+
+def process_blood_request(request_id, bank_id):
+    with get_cursor(conn) as cursor:
+        try:
+            cursor.callproc('process_blood_request', (request_id, bank_id, 0))
+            for result in cursor.stored_results():
+                status_message = result.fetchone()[0]
+            conn.commit()
+            return status_message
+        except Error as e:
+            st.error(f"Error: {e}")
+            return None
+
+# Main app
 def main():
     st.title("Blood Donation Management System")
-    
-    
-    if 'logged_in' not in st.session_state:
-        st.session_state.logged_in = False
-    
-    if not st.session_state.logged_in:
-        show_login()
+
+    if conn is None:
+        st.error("Unable to connect to the database. Please check your connection settings.")
+        return
+
+    if 'user' not in st.session_state:
+        st.session_state.user = None
+
+    if st.session_state.user is None:
+        show_login_register()
     else:
         show_dashboard()
 
-def show_login():
-    st.subheader("Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    
-    if st.button("Login"):
-        user = authenticate_user(username, password)
-        if user:
-            st.session_state.logged_in = True
-            st.session_state.user = user
-            st.experimental_rerun()
-        else:
-            st.error("Invalid username or password")
+def show_login_register():
+    tab1, tab2 = st.tabs(["Login", "Register"])
+
+    with tab1:
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input("Password", type="password", key="login_password")
+        if st.button("Login"):
+            user = login(username, password)
+            if user:
+                st.session_state.user = user
+                st.success("Logged in successfully!")
+                st.experimental_rerun()
+            else:
+                st.error("Invalid username or password")
+
+    with tab2:
+        new_username = st.text_input("New Username", key="register_username")
+        new_password = st.text_input("New Password", type="password", key="register_password")
+        email = st.text_input("Email")
+        user_type = st.selectbox("User Type", ["donor", "hospital_staff", "blood_bank_staff"])
+        if st.button("Register"):
+            if register(new_username, new_password, email, user_type):
+                st.success("Registered successfully! Please log in.")
+            else:
+                st.error("Registration failed. Please try again.")
 
 def show_dashboard():
     st.sidebar.title(f"Welcome, {st.session_state.user['username']}")
     user_type = st.session_state.user['user_type']
-    
-    menu_options = {
-        'donor': ['Profile', 'Donate Blood', 'Donation History'],
-        'hospital_staff': ['Blood Requests', 'Inventory Status', 'Request History'],
-        'blood_bank_staff': ['Inventory Management', 'Donor Records', 'Process Requests'],
-        'admin': ['User Management', 'System Statistics', 'Blood Bank Management']
-    }
-    
-    selection = st.sidebar.selectbox("Menu", menu_options[user_type])
-    
-    if st.sidebar.button("Logout"):
-        st.session_state.logged_in = False
-        st.experimental_rerun()
-    
-    
+
     if user_type == 'donor':
-        if selection == 'Profile':
-            show_donor_profile()
-        elif selection == 'Donate Blood':
-            show_donation_form()
-        else:
-            show_donation_history()
+        show_donor_dashboard()
     elif user_type == 'hospital_staff':
-        if selection == 'Blood Requests':
-            show_blood_request_form()
-        elif selection == 'Inventory Status':
-            show_inventory_status()
-        else:
-            show_request_history()
+        show_hospital_dashboard()
+    elif user_type == 'blood_bank_staff':
+        show_blood_bank_dashboard()
 
-def show_donor_profile():
-    st.subheader("Donor Profile")
-    conn = init_connection()
-    cursor = conn.cursor(dictionary=True)
-    
-    cursor.execute(
-        "SELECT * FROM donor_profiles WHERE user_id = %s",
-        (st.session_state.user['user_id'],)
-    )
-    profile = cursor.fetchone()
-    
-    if profile:
-        col1, col2 = st.columns(2)
-        with col1:
+    if st.sidebar.button("Logout"):
+        st.session_state.user = None
+        st.experimental_rerun()
+
+def show_donor_dashboard():
+    tab1, tab2, tab3 = st.tabs(["Profile", "Schedule Donation", "Donation History"])
+
+    with tab1:
+        profile = get_donor_profile(st.session_state.user['user_id'])
+        if profile:
             st.write(f"Name: {profile['full_name']}")
-            st.write(f"Blood Type: {profile['blood_type']}")
             st.write(f"Date of Birth: {profile['date_of_birth']}")
-        with col2:
+            st.write(f"Blood Type: {profile['blood_type']}")
             st.write(f"Contact: {profile['contact_number']}")
+            st.write(f"Address: {profile['address']}")
             st.write(f"Last Donation: {profile['last_donation_date']}")
-            st.write(f"Eligible to Donate: {'Yes' if profile['is_eligible'] else 'No'}")
-    
-    cursor.close()
-
-def show_donation_form():
-    st.subheader("Schedule Blood Donation")
-    
-    blood_banks = get_blood_banks()
-    selected_bank = st.selectbox("Select Blood Bank", blood_banks)
-    
-    donation_date = st.date_input("Select Donation Date", min_value=date.today())
-    
-    if st.button("Schedule Donation"):
-        if schedule_donation(selected_bank, donation_date):
-            st.success("Donation scheduled successfully!")
         else:
-            st.error("Unable to schedule donation. Please try again.")
+            st.warning("Please update your profile")
 
-def show_inventory_status():
-    st.subheader("Blood Inventory Status")
-    
-    conn = init_connection()
-    cursor = conn.cursor(dictionary=True)
-    
-    cursor.execute("""
-        SELECT blood_type, SUM(units_available) as total_units
-        FROM blood_inventory
-        GROUP BY blood_type
-    """)
-    
-    inventory_data = cursor.fetchall()
-    cursor.close()
-    
-    if inventory_data:
-        df = pd.DataFrame(inventory_data)
-        st.bar_chart(df.set_index('blood_type'))
-        
-        st.table(df)
-    else:
-        st.write("No inventory data available")
+        with st.form("update_profile"):
+            full_name = st.text_input("Full Name")
+            dob = st.date_input("Date of Birth")
+            blood_type = st.selectbox("Blood Type", ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"])
+            contact = st.text_input("Contact Number")
+            address = st.text_area("Address")
+            medical_history = st.text_area("Medical History")
+            if st.form_submit_button("Update Profile"):
+                if update_donor_profile(st.session_state.user['user_id'], full_name, dob, blood_type, contact, address, medical_history):
+                    st.success("Profile updated successfully!")
+                else:
+                    st.error("Failed to update profile. Please try again.")
 
-def show_blood_request_form():
-    st.subheader("Request Blood")
-    
-    blood_type = st.selectbox("Blood Type Required", 
-                             ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'])
-    units = st.number_input("Units Required", min_value=1, value=1)
-    priority = st.selectbox("Priority Level", ['low', 'medium', 'high', 'critical'])
-    
-    if st.button("Submit Request"):
-        if submit_blood_request(blood_type, units, priority):
-            st.success("Blood request submitted successfully!")
+    with tab2:
+        blood_banks = execute_query("SELECT bank_id, name FROM blood_banks")
+        if blood_banks:
+            bank_id = st.selectbox("Select Blood Bank", options=blood_banks, format_func=lambda x: x['name'])
+            donation_date = st.date_input("Donation Date", min_value=datetime.now().date())
+            if st.button("Schedule Donation"):
+                donor_profile = get_donor_profile(st.session_state.user['user_id'])
+                if donor_profile:
+                    if schedule_donation(donor_profile['donor_id'], bank_id['bank_id'], donation_date):
+                        st.success("Donation scheduled successfully!")
+                    else:
+                        st.error("Failed to schedule donation. Please try again.")
+                else:
+                    st.error("Please update your profile before scheduling a donation")
         else:
-            st.error("Unable to submit request. Please try again.")
+            st.error("No blood banks available. Please contact the administrator.")
 
-def get_blood_banks():
-    conn = init_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT bank_id, name FROM blood_banks")
-    banks = cursor.fetchall()
-    cursor.close()
-    return banks
+    with tab3:
+        donor_profile = get_donor_profile(st.session_state.user['user_id'])
+        if donor_profile:
+            history = get_donation_history(donor_profile['donor_id'])
+            if history:
+                st.table(history)
+            else:
+                st.info("No donation history found")
+        else:
+            st.warning("Please update your profile to view donation history")
 
-def schedule_donation(bank_id, donation_date):
-    conn = init_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "INSERT INTO donation_records (donor_id, bank_id, donation_date) VALUES (%s, %s, %s)",
-            (st.session_state.user['user_id'], bank_id, donation_date)
-        )
-        conn.commit()
-        return True
-    except Exception as e:
-        print(e)
-        return False
-    finally:
-        cursor.close()
+def show_hospital_dashboard():
+    tab1, tab2, tab3 = st.tabs(["Inventory Status", "Request Blood", "Request History"])
 
-def submit_blood_request(blood_type, units, priority):
-    conn = init_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """INSERT INTO blood_requests 
-               (requesting_hospital_id, blood_type, units_required, priority) 
-               VALUES (%s, %s, %s, %s)""",
-            (st.session_state.user['user_id'], blood_type, units, priority)
-        )
-        conn.commit()
-        return True
-    except Exception as e:
-        print(e)
-        return False
-    finally:
-        cursor.close()
+    with tab1:
+        inventory = get_inventory_status()
+        if inventory:
+            st.table(inventory)
+        else:
+            st.info("No inventory data available")
+
+    with tab2:
+        blood_type = st.selectbox("Blood Type", ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"])
+        units = st.number_input("Units Required", min_value=1, value=1)
+        priority = st.selectbox("Priority", ["low", "medium", "high", "critical"])
+        if st.button("Submit Request"):
+            if submit_blood_request(st.session_state.user['user_id'], blood_type, units, priority):
+                st.success("Blood request submitted successfully!")
+            else:
+                st.error("Failed to submit blood request. Please try again.")
+
+    with tab3:
+        requests = get_blood_requests(st.session_state.user['user_id'])
+        if requests:
+            st.table(requests)
+        else:
+            st.info("No request history found")
+
+def show_blood_bank_dashboard():
+    tab1, tab2, tab3 = st.tabs(["Manage Inventory", "Donor Records", "Process Requests"])
+
+    with tab1:
+        blood_type = st.selectbox("Blood Type", ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"])
+        units = st.number_input("Units", min_value=1, value=1)
+        if st.button("Update Inventory"):
+            if update_inventory(st.session_state.user['user_id'], blood_type, units):
+                st.success("Inventory updated successfully!")
+            else:
+                st.error("Failed to update inventory. Please try again.")
+
+    with tab2:
+        records = get_donor_records(st.session_state.user['user_id'])
+        if records:
+            st.table(records)
+        else:
+            st.info("No donor records found")
+
+    with tab3:
+        requests = get_blood_requests(st.session_state.user['user_id'])
+        if requests:
+            for request in requests:
+                st.write(f"Request ID: {request['request_id']}")
+                st.write(f"Blood Type: {request['blood_type']}")
+                st.write(f"Units Required: {request['units_required']}")
+                st.write(f"Priority: {request['priority']}")
+                st.write(f"Status: {request['status']}")
+                if request['status'] == 'pending':
+                    if st.button(f"Process Request {request['request_id']}"):
+                        status_message = process_blood_request(request['request_id'], st.session_state.user['user_id'])
+                        st.write(status_message)
+                st.write("---")
+        else:
+            st.info("No pending requests found")
 
 if __name__ == "__main__":
     main()
