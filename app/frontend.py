@@ -1,24 +1,31 @@
 import streamlit as st
 import mysql.connector
-from datetime import datetime
+from datetime import datetime, time
+import pandas as pd 
 
-# Helper function to create MySQL connection
+
 def create_connection():
     return mysql.connector.connect(
-        host="localhost",
-        user="root",  # Replace with your MySQL username
-        password="Resh@1234",  # Replace with your MySQL password
+        host="127.0.0.1",
+        user="example",  
+        password="Project@123", 
         database="blood_donation_db"
     )
 
-# Authentication function
+
 def authenticate_user(username, password):
     conn = create_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT role FROM User WHERE username=%s AND password=%s", (username, password))
-    role = cursor.fetchone()
+    cursor.execute("SELECT user_id, role FROM User WHERE username=%s AND password=%s", (username, password))
+    user = cursor.fetchone()
     conn.close()
-    return role
+    return user
+
+
+def logout():
+    st.session_state["logged_in"] = False
+    st.session_state["role"] = None
+    st.session_state["logged_out"] = True  # Trigger rerun outside of callback
 
 # Signup function
 def signup_user(username, password, role):
@@ -33,181 +40,411 @@ def signup_user(username, password, role):
     finally:
         conn.close()
 
-# Donor Dashboard Functions
-# Function to register a new donor with an email field
+# Function to retrieve blood banks from the database
+def get_blood_banks():
+    conn = create_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT blood_bank_id, name FROM BloodBank")
+    blood_banks = cursor.fetchall()
+    conn.close()
+    return blood_banks
+
+# Function to register a new donor (without selecting blood bank here)
 def register_donor():
-    st.subheader("Register a New Donation")
+    st.subheader("Register as a Donor")
+    
+    # Get list of blood banks for selection
+    blood_banks = get_blood_banks()
+    if not blood_banks:
+        st.error("No blood banks available. Please contact administrator.")
+        return
+        
+    # Create dictionary of blood bank names and IDs
+    blood_bank_options = {name: id for id, name in blood_banks}
+    
+    # Form inputs
     first_name = st.text_input("First Name")
     last_name = st.text_input("Last Name")
-    email = st.text_input("Email")  # New field for donor email
+    email = st.text_input("Email")
     blood_type = st.selectbox("Blood Type", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
     last_donation = st.date_input("Last Donation Date")
     eligibility_status = st.selectbox("Eligibility Status", ["Eligible", "Ineligible"])
+    
+    # Blood bank selection
+    selected_blood_bank = st.selectbox("Choose a Blood Bank", options=list(blood_bank_options.keys()))
+    selected_blood_bank_id = blood_bank_options[selected_blood_bank]
 
     if st.button("Register Donor"):
         conn = create_connection()
         cursor = conn.cursor()
         try:
-            # Insert with email
             cursor.execute(
-                "INSERT INTO Donor (first_name, last_name, email, blood_type, last_donation, eligibility_status) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (first_name, last_name, email, blood_type, last_donation, eligibility_status)
+                "INSERT INTO Donor (first_name, last_name, email, blood_type, last_donation, eligibility_status, blood_bank_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (first_name, last_name, email, blood_type, last_donation, eligibility_status, selected_blood_bank_id)
             )
             conn.commit()
             st.success("Donor registered successfully!")
+            
+            # Store donor_id in session state for future use
+            cursor.execute("SELECT LAST_INSERT_ID()")
+            donor_id = cursor.fetchone()[0]
+            st.session_state["donor_id"] = donor_id
+            
         except mysql.connector.Error as e:
             st.error(f"Error: {e}")
         finally:
             conn.close()
 
-def search_donor_info(first_name, last_name, email):
-    conn = create_connection()
-    cursor = conn.cursor()
-    query = """
-    SELECT donor_id, first_name, last_name, blood_type, last_donation, eligibility_status
-    FROM Donor 
-    WHERE first_name = %s AND last_name = %s AND email = %s
-    """
-    cursor.execute(query, (first_name, last_name, email))
-    donor = cursor.fetchone()
-    conn.close()
-    return donor
+# Function to schedule an appointment
+def update_blood_inventory():
+    st.subheader("Update Blood Bank Inventory")
 
-def update_donor_info(donor_id, last_donation, eligibility_status):
-    conn = create_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "UPDATE Donor SET last_donation = %s, eligibility_status = %s WHERE donor_id = %s",
-            (last_donation, eligibility_status, donor_id)
-        )
-        conn.commit()
-        st.success("Donor information updated successfully!")
-    except mysql.connector.Error as e:
-        st.error(f"Error: {e}")
-    finally:
-        conn.close()
-def display_update_form():
-    st.subheader("Update Donor Information")
+    # Fetch all blood banks
+    blood_banks = get_blood_banks()
+    if blood_banks:
+        # Create a dictionary with blood bank names as keys and IDs as values
+        blood_bank_options = {name: id for id, name in blood_banks}
 
-    # Step 1: Search for the donor
-    first_name = st.text_input("First Name")
-    last_name = st.text_input("Last Name")
-    email = st.text_input("Email")  # Assuming email is stored in the Donor table
+        # Dropdown to select a blood bank
+        selected_blood_bank = st.selectbox("Choose a Blood Bank", options=blood_bank_options.keys())
+        selected_blood_bank_id = blood_bank_options[selected_blood_bank]
 
-    if st.button("Search"):
-        donor = search_donor_info(first_name, last_name, email)
-        if donor:
-            st.success("Donor found! You can now update the information.")
-            donor_id, _, _, _, last_donation, eligibility_status = donor
+        # Blood type selection and units input
+        blood_type = st.selectbox("Select Blood Type", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
+        units_available = st.number_input("Update Units Available", min_value=0, step=1)
 
-            # Step 2: Display form to update information
-            new_last_donation = st.date_input("Last Donation Date", last_donation)
-            new_eligibility_status = st.selectbox("Eligibility Status", ["Eligible", "Ineligible"], 
-                                                  index=0 if eligibility_status == "Eligible" else 1)
+        if st.button("Update Inventory"):
+            conn = create_connection()
+            cursor = conn.cursor()
+            try:
+                # Call the stored procedure to update the inventory
+                cursor.callproc('update_blood_inventory', (selected_blood_bank_id, blood_type, int(units_available)))
+                conn.commit()
+                st.success(f"Inventory updated for {blood_type} at {selected_blood_bank}.")
+            except mysql.connector.Error as e:
+                st.error(f"Error: {e}")
+            finally:
+                conn.close()
+    else:
+        st.warning("No blood banks available. Please register a blood bank first.")
+def schedule_appointment():
+    st.subheader("Schedule an Appointment with a Blood Bank")
 
-            if st.button("Update Information"):
-                update_donor_info(donor_id, new_last_donation, new_eligibility_status)
-        else:
-            st.error("No donor found with the provided information.")
+    # Fetch blood banks for dropdown
+    blood_banks = get_blood_banks()
+    if blood_banks:
+        # Create dictionary with blood bank names as keys and IDs as values
+        blood_bank_options = {name: id for id, name in blood_banks}
+        
+        # Display blood bank selection dropdown
+        selected_blood_bank = st.selectbox("Choose a Blood Bank", options=list(blood_bank_options.keys()))
+        # Get the correct blood bank ID from our dictionary
+        selected_blood_bank_id = blood_bank_options[selected_blood_bank]
+
+        # Blood type selection
+        blood_type = st.selectbox("Select Blood Type for Donation", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
+
+        # Appointment date and time inputs
+        appointment_date = st.date_input("Select Appointment Date")
+        appointment_time = st.time_input("Select Appointment Time", value=time(9, 0))
+
+        if st.button("Schedule Appointment"):
+            conn = create_connection()
+            cursor = conn.cursor()
+            try:
+                # Start a transaction
+                conn.start_transaction()
+
+                # Get donor_id from session state
+                donor_id = st.session_state.get("donor_id")
+                if not donor_id:
+                    raise ValueError("Donor ID not found in session")
+
+                # First, insert the appointment
+                cursor.execute(
+                    """
+                    INSERT INTO Appointments 
+                    (donor_id, blood_bank_id, appointment_date, appointment_time) 
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (donor_id, selected_blood_bank_id, appointment_date, appointment_time)
+                )
+
+                # Then, update the inventory for the selected blood bank
+                cursor.execute(
+                    """
+                    INSERT INTO BloodInventory 
+                    (blood_bank_id, blood_type, units_available) 
+                    VALUES (%s, %s, 1)
+                    ON DUPLICATE KEY UPDATE 
+                    units_available = units_available + 1,
+                    blood_bank_id = VALUES(blood_bank_id)
+                    """,
+                    (selected_blood_bank_id, blood_type)
+                )
+
+                # Commit the transaction
+                conn.commit()
+                st.success(f"Appointment scheduled successfully at {selected_blood_bank}!")
+                
+                # Debug information
+                st.info(f"Appointment and inventory updated for Blood Bank ID: {selected_blood_bank_id}")
+                
+            except mysql.connector.Error as e:
+                conn.rollback()
+                st.error(f"Database Error: {e}")
+            except ValueError as e:
+                st.error(f"Session Error: {e}")
+            finally:
+                conn.close()
+    else:
+        st.warning("No blood banks available. Please register a blood bank first.")
 
 
-# Blood Bank Staff Dashboard Functions
-def manage_inventory():
-    st.subheader("Manage Blood Inventory")
-    blood_type_inv = st.selectbox("Blood Type for Inventory", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
-    units_available = st.number_input("Units Available", min_value=0)
-    expiration_date = st.date_input("Expiration Date")
-    is_safe = st.selectbox("Is Safe for Use", [True, False])
 
-    if st.button("Add/Update Inventory"):
+
+
+# Function to add a new blood bank (staff role)
+def register_blood_bank():
+    st.subheader("Register a New Blood Bank")
+    name = st.text_input("Blood Bank Name")
+    location = st.text_input("Location")
+    contact_number = st.text_input("Contact Number")
+
+    if st.button("Add Blood Bank"):
         conn = create_connection()
         cursor = conn.cursor()
         try:
-            cursor.callproc('add_blood_inventory', (blood_type_inv, units_available, expiration_date, is_safe))
+            cursor.callproc('add_blood_bank', (name, location, contact_number))
             conn.commit()
-            st.success("Inventory updated successfully!")
+            st.success("Blood bank added successfully!")
         except mysql.connector.Error as e:
             st.error(f"Error: {e}")
         finally:
             conn.close()
+
+# Function to manage blood inventory (staff role)
+
+
 
 def view_inventory():
     st.subheader("View Blood Inventory")
+    
+    # Fetch blood banks for dropdown
+    blood_banks = get_blood_banks()
+    if blood_banks:
+        # Create a dictionary with blood bank names as keys and IDs as values
+        blood_bank_options = {name: id for id, name in blood_banks}
+        
+        # Dropdown to select a blood bank
+        selected_blood_bank = st.selectbox("Choose a Blood Bank", options=blood_bank_options.keys())
+        selected_blood_bank_id = blood_bank_options[selected_blood_bank]
+
+        # Now, fetch the inventory for the selected blood bank
+        conn = create_connection()
+        cursor = conn.cursor()
+        
+        # Modified query to only fetch existing columns
+        cursor.execute("""
+            SELECT blood_type, units_available 
+            FROM BloodInventory 
+            WHERE blood_bank_id = %s
+        """, (selected_blood_bank_id,))
+        
+        # Fetch all records for the selected blood bank
+        blood_inventory_data = cursor.fetchall()
+        conn.close()
+
+        # Display the inventory details
+        if blood_inventory_data:
+            st.write(f"### Inventory details for {selected_blood_bank}")
+            
+            # Create a more organized display using columns
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("*Blood Type*")
+                for record in blood_inventory_data:
+                    st.write(record[0])
+                    
+            with col2:
+                st.write("*Units Available*")
+                for record in blood_inventory_data:
+                    st.write(record[1])
+                    
+        else:
+            st.warning("No inventory found for this blood bank.")
+    else:
+        st.warning("No blood banks available. Please register a blood bank first.")
+
+
+# Function to request blood (medical professional role)
+def request_blood():
+    st.subheader("Request Blood for Medical Purposes")
+
+    # Fetch all blood banks
+    blood_banks = get_blood_banks()
+    if blood_banks:
+        # Create a dictionary with blood bank names as keys and IDs as values
+        blood_bank_options = {name: id for id, name in blood_banks}
+
+        # Dropdown to select a blood bank
+        selected_blood_bank = st.selectbox("Choose a Blood Bank", options=blood_bank_options.keys())
+        selected_blood_bank_id = blood_bank_options[selected_blood_bank]
+
+        # Blood type selection and units input
+        blood_type = st.selectbox("Select Blood Type", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
+        units_needed = st.number_input("Number of Units Required", min_value=1, step=1)
+
+        if st.button("Request Blood"):
+            conn = create_connection()
+            cursor = conn.cursor()
+            try:
+                # Insert blood request into BloodRequest table
+                cursor.execute(
+                    "INSERT INTO BloodRequest (blood_bank_id, blood_type, units_requested) "
+                    "VALUES (%s, %s, %s)",
+                    (selected_blood_bank_id, blood_type, units_needed)
+                )
+                conn.commit()
+
+                # Decrease the available units in the BloodInventory
+                cursor.execute("""
+                    UPDATE BloodInventory 
+                    SET units_available = units_available - %s 
+                    WHERE blood_bank_id = %s AND blood_type = %s AND units_available >= %s
+                """, (units_needed, selected_blood_bank_id, blood_type, units_needed))
+
+                # Check if there are enough units available
+                if cursor.rowcount == 0:
+                    st.error(f"Not enough units of {blood_type} available in {selected_blood_bank}.")
+                else:
+                    conn.commit()
+                    st.success(f"Blood request placed for {units_needed} units of {blood_type} from {selected_blood_bank}.")
+            except mysql.connector.Error as e:
+                st.error(f"Error: {e}")
+            finally:
+                conn.close()
+
+    else:
+        st.warning("No blood banks available. Please contact support.")
+
+# Function to view inventories of all blood banks (medical professional role)
+def view_all_inventories():
+    st.subheader("View Blood Inventories of All Blood Banks")
+
     conn = create_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM BloodInventory")
+
+    # Query to fetch inventory data from all blood banks
+    cursor.execute("""
+        SELECT b.name, bi.blood_type, bi.units_available 
+        FROM BloodBank b
+        JOIN BloodInventory bi ON b.blood_bank_id = bi.blood_bank_id
+        ORDER BY b.name, bi.blood_type
+    """)
+    
     blood_inventory_data = cursor.fetchall()
-    st.write(blood_inventory_data)
+
+    # Query to fetch the total units of each blood type across all blood banks
+    cursor.execute("""
+        SELECT blood_type, SUM(units_available) AS total_units
+        FROM BloodInventory
+        GROUP BY blood_type
+    """)
+    
+    aggregated_data = cursor.fetchall()
     conn.close()
 
-# Medical Professional Dashboard Functions
-def request_blood():
-    st.subheader("Request Blood")
-    requester_type = st.selectbox("Requester Type", ["Hospital", "Patient"])
-    blood_type_req = st.selectbox("Blood Type for Request", ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"])
-    quantity = st.number_input("Quantity", min_value=1)
-    
-    if st.button("Place Request"):
+    if blood_inventory_data:
+        current_blood_bank = None
+        for record in blood_inventory_data:
+            blood_bank_name, blood_type, units_available = record
+            if blood_bank_name != current_blood_bank:
+                if current_blood_bank is not None:
+                    st.write("---")  # Separator for different blood banks
+                st.write(f"{blood_bank_name}:")
+                current_blood_bank = blood_bank_name
+            st.write(f"- Blood Type: {blood_type}, Units Available: {units_available}")
+    else:
+        st.warning("No blood inventory data available.")
+
+    # Display the aggregated inventory details
+    if aggregated_data:
+        st.write("### Total Inventory across all Blood Banks")
+        
+        # Create a more organized display using columns
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("Blood Type")
+            for record in aggregated_data:
+                st.write(record[0])
+                
+        with col2:
+            st.write("Total Units")
+            for record in aggregated_data:
+                st.write(record[1])
+def view_donors_for_blood_bank():
+    st.subheader("View Donors for Blood Bank")
+
+    # Fetch all blood banks
+    blood_banks = get_blood_banks()
+    if blood_banks:
+        # Create a dictionary with blood bank names as keys and IDs as values
+        blood_bank_options = {name: id for id, name in blood_banks}
+
+        # Dropdown to select a blood bank
+        selected_blood_bank = st.selectbox("Choose a Blood Bank", options=blood_bank_options.keys())
+        selected_blood_bank_id = blood_bank_options[selected_blood_bank]
+
         conn = create_connection()
         cursor = conn.cursor()
         try:
-            cursor.callproc('place_blood_request', (requester_type, blood_type_req, quantity, None))
-            conn.commit()
-            cursor.execute("SELECT status FROM BloodRequests ORDER BY request_id DESC LIMIT 1")
-            request_status = cursor.fetchone()[0]
-            st.success(f"Blood request placed successfully! Status: {request_status}")
+            # Call the stored procedure to get the donors for the selected blood bank
+            cursor.execute("""
+                CALL get_donors_for_blood_bank(%s)
+            """, (selected_blood_bank_id,))
+
+            donor_data = cursor.fetchall()
+
+            if donor_data:
+                st.write(f"### Donors registered with {selected_blood_bank}")
+
+                # Create a table for better display
+                donor_df = pd.DataFrame(donor_data, columns=["First Name", "Last Name", "Email", "Blood Type", "Last Donation", "Eligibility Status"])
+
+                # Format the 'Last Donation' column to display the date correctly
+                donor_df["Last Donation"] = donor_df["Last Donation"].apply(lambda x: x.strftime('%Y-%m-%d') if isinstance(x, datetime) else x)
+
+                # Display the table
+                st.dataframe(donor_df)
+
+            else:
+                st.warning(f"No donors found for {selected_blood_bank}.")
         except mysql.connector.Error as e:
             st.error(f"Error: {e}")
         finally:
             conn.close()
-
-def view_error_logs():
-    st.subheader("Error Logs")
-    conn = create_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM ErrorLogs")
-    error_logs = cursor.fetchall()
-    if error_logs:
-        st.write(error_logs)
     else:
-        st.write("No error logs found.")
-    conn.close()
+        st.warning("No blood banks available. Please register a blood bank first.")
 
-# Dashboard for each role
-def donor_dashboard():
-    st.sidebar.title("Donor Dashboard")
-    choice = st.sidebar.radio("Select an option", ["Register Donation", "Update Information"])
-    
-    if choice == "Register Donation":
-        register_donor()
-    elif choice == "Update Information":
-        display_update_form()
-
-def blood_bank_staff_dashboard():
-    st.sidebar.title("Blood Bank Staff Dashboard")
-    choice = st.sidebar.radio("Select an option", ["Manage Inventory", "View Inventory"])
-    if choice == "Manage Inventory":
-        manage_inventory()
-    elif choice == "View Inventory":
-        view_inventory()
-
-def medical_professional_dashboard():
-    st.sidebar.title("Medical Professional Dashboard")
-    choice = st.sidebar.radio("Select an option", ["Request Blood", "View Error Logs"])
-    if choice == "Request Blood":
-        request_blood()
-    elif choice == "View Error Logs":
-        view_error_logs()
-
-# Main application
 def main():
     # Initialize session state variables if not already set
     if "logged_in" not in st.session_state:
         st.session_state["logged_in"] = False
     if "role" not in st.session_state:
         st.session_state["role"] = None
+    if "logged_out" not in st.session_state:
+        st.session_state["logged_out"] = False
+    if "donor_id" not in st.session_state:
+        st.session_state["donor_id"] = None
+
+    # Check if logout was triggered
+    if st.session_state["logged_out"]:
+        st.session_state["logged_out"] = False  # Reset logout trigger
+        st.experimental_rerun()  # Rerun to refresh the login/signup view
 
     # Login and Signup Page if not logged in
     if not st.session_state["logged_in"]:
@@ -228,21 +465,42 @@ def main():
             password = st.text_input("Password", type="password")
 
             if st.button("Login"):
-                user_role = authenticate_user(username, password)
-                if user_role:
+                user = authenticate_user(username, password)
+                if user:
                     st.session_state["logged_in"] = True
-                    st.session_state["role"] = user_role[0]
+                    st.session_state["role"] = user[1]
+                    st.session_state["donor_id"] = user[0]  # Store donor_id for scheduling appointments
                     st.experimental_rerun()  # Reload the page to show dashboard
                 else:
                     st.error("Invalid credentials")
     else:
+        # Display a logout button in the sidebar
+        st.sidebar.button("Logout", on_click=logout)
+
         # Render role-specific dashboard based on user's role
         if st.session_state["role"] == "Donor":
-            donor_dashboard()
+            action = st.sidebar.selectbox("Select an option", ["Register as Donor", "Schedule Appointment"])
+            if action == "Register as Donor":
+                register_donor()
+            elif action == "Schedule Appointment":
+                schedule_appointment()
         elif st.session_state["role"] == "Blood Bank Staff":
-            blood_bank_staff_dashboard()
+            action = st.sidebar.selectbox("Select an option", ["Register Blood Bank", "Update Inventory","View Donors"])
+            if action == "Register Blood Bank":
+                register_blood_bank()
+            
+            elif action == "Update Inventory":
+                update_blood_inventory()
+            elif action=="View Donors":
+                view_donors_for_blood_bank()
+
+                
         elif st.session_state["role"] == "Medical Professional":
-            medical_professional_dashboard()
+            action = st.sidebar.selectbox("Select an option", ["Request Blood", "View All Inventories"])
+            if action == "Request Blood":
+                request_blood()
+            elif action == "View All Inventories":
+                view_all_inventories()
 
 # Run the application
 if __name__ == "__main__":
